@@ -1,8 +1,9 @@
-using 
+using
 	CSV,
-	DataFrames, 
+	DataFrames,
+	Dates,
 	DecisionTree,
-	Statistics, 
+	Statistics,
 	Plots,
 	Random
 
@@ -11,14 +12,69 @@ building = CSV.file("data/building_metadata.csv") |> DataFrame!
 train = CSV.file("data/train.csv") |> DataFrame!
 weather = CSV.file("data/weather_train.csv") |> DataFrame!
 full = join(train, building, on=:building_id, kind=:left) |> x -> join(x, weather, on=[:site_id, :timestamp], kind=:left)
+# adding day, month, hour
+date_format = Dates.DateFormat("yyyy-mm-dd HH:MM:ss")
+full.timestamp = Dates.DateTime.(full.timestamp, date_format)
+full[!, :day] = Dates.day.(full.timestamp)
+full[!, :month] = Dates.month.(full.timestamp)
+full[!, :hour] = Dates.hour.(full.timestamp)
+full[!, :dow] = Dates.dayofweek.(full.timestamp)
 
+# test data read
+test = CSV.file("data/test.csv") |> DataFrame!
+weather_test = CSV.file("data/weather_test.csv") |> DataFrame!
+full_test = join(test, building, on=:building_id, kind=:left) |> x -> join(x, weather_test, on=[:site_id, :timestamp], kind=:left)
+# adding day, month, hour
+date_format = Dates.DateFormat("yyyy-mm-dd HH:MM:ss")
+full_test.timestamp = Dates.DateTime.(full_test.timestamp, date_format)
+full_test[!, :day] = Dates.day.(full_test.timestamp)
+full_test[!, :month] = Dates.month.(full_test.timestamp)
+full_test[!, :hour] = Dates.hour.(full_test.timestamp)
+full_test[!, :dow] = Dates.dayofweek.(full_test.timestamp)
 
-# filling in missing values with mean
-X = full[!, [:meter, :site_id, :square_feet, :year_built, :floor_count, :air_temperature, :cloud_coverage, :dew_temperature, :precip_depth_1_hr, :sea_level_pressure, :wind_direction, :wind_speed, :meter_reading]]
-for col in names(X)[1:end-1]
-    X[!, Symbol(col)] = recode(X[!, Symbol(col)], missing => mean(skipmissing(X[!, Symbol(col)])))
+### functions
+# define one hot function
+function one_hot(df, col)
+	new_df = copy(df)
+	possibilities = unique(df[!, col])
+	names = string(col) .* "_" .* string.(possibilities)
+	for i in 1:length(possibilities)
+		new_df[!, Symbol(names[i])] .= 0
+		new_df[new_df[!, col] .== possibilities[i], Symbol(names[i])] .= 1
+	end
+	select!(new_df, Not(col))
+	return new_df
 end
 
+# scoring function
+function logging(pred, target)
+    return (log(pred + 1) - log(target + 1))^2
+end
+function result(pred, target)
+    return sqrt(
+        (1/length(pred)) * sum(logging.(pred, target))
+    )
+end
+
+# generate the dataset needed for algorithms from "full" dfs
+function gen_dataset(df, test_set=true)
+	X = copy(df)
+	# desired columns
+	if test_set
+		X = X[!, [:meter, :site_id, :square_feet, :year_built, :floor_count, :air_temperature, :cloud_coverage, :dew_temperature, :precip_depth_1_hr, :sea_level_pressure, :wind_direction, :wind_speed, :meter_reading, :day, :month, :hour, :dow]]
+	else
+		X = X[!, [:meter, :site_id, :square_feet, :year_built, :floor_count, :air_temperature, :cloud_coverage, :dew_temperature, :precip_depth_1_hr, :sea_level_pressure, :wind_direction, :wind_speed, :day, :month, :hour, :dow]]
+	end
+	# filling nas with means
+	for col in names(X)[1:end-1]
+	    X[!, Symbol(col)] = recode(X[!, Symbol(col)], missing => mean(skipmissing(X[!, Symbol(col)])))
+	end
+	# one hot encoding
+	for col in [:meter, :site_id, :dow]
+		X = one_hot(X, col)
+	end
+	return X
+end
 
 # train test split
 function train_test_split(X::DataFrame, target_col::String, seed=0)
@@ -33,14 +89,17 @@ function train_test_split(X::DataFrame, target_col::String, seed=0)
         data[train_idx,:], data[test_idx,:]
     end
 
-    train,test = partitionTrainTest(X, 0.66, seed)
+    train,test = partitionTrainTest(X, 0.8, seed)
     X_train = select(train, Not(:meter_reading))
     y_train = train[!, Symbol(target_col)]
     X_test = select(test, Not(:meter_reading))
     y_test = test[!, Symbol(target_col)]
     return X_train, X_test, y_train, y_test
 end
+### functions
 
+# training data
+X = gen_dataset(full)
 X_train, X_test, y_train, y_test = train_test_split(X, "meter_reading")
 
 
@@ -48,17 +107,16 @@ X_train, X_test, y_train, y_test = train_test_split(X, "meter_reading")
 dt = DecisionTreeRegressor()
 fit!(dt, convert(Matrix, X_train), convert(Array, y_train))
 preds = predict(dt, convert(Matrix, X_test))
-
-# scoring function
-function logging(pred, target)
-    return (log(pred + 1) - log(target + 1))^2
-end
-function result(pred, target)
-    return sqrt(
-        (1/length(pred)) * sum(logging.(pred, target))
-    )
-end
 print("dt: " * String(result(preds, y_test)))
+
+
+# submission
+fit!(dt, X, full[!, :meter_reading)
+X_submission = gen_dataset(full_test, false)
+final_preds = predict(dt, convert(Matrix, X_submission))
+X_submission[!, :meter_reading] = final_preds
+X_submission[!, :row_id] = test.row_id
+CSV.write("data/submission_dt.csv", X_submission[!, [:row_id, :meter_reading]])
 
 
 # random forest
@@ -75,27 +133,3 @@ rf = build_forest(convert(Array, y_train), convert(Matrix, X_train),
                      min_purity_increase)
 preds = apply_forest(rf, convert(Matrix, X_test))
 print("rf: " * results(preds, y_test))
-
-
-# test data
-test = CSV.file("data/test.csv") |> DataFrame!
-weather_test = CSV.file("data/weather_test.csv") |> DataFrame!
-full_test = join(test, building, on=:building_id, kind=:left) |> x -> join(x, weather_test, on=[:site_id, :timestamp], kind=:left)
-
-X_final = full_test[!, [:meter, :site_id, :square_feet, :year_built, :floor_count, :air_temperature, :cloud_coverage, :dew_temperature, :precip_depth_1_hr, :sea_level_pressure, :wind_direction, :wind_speed]]
-for col in names(X_final)
-    X_final[!, Symbol(col)] = recode(X_final[!, Symbol(col)], missing => mean(skipmissing(X_final[!, Symbol(col)])))
-end
-final_preds = predict(dt, convert(Matrix, X_final))
-
-# dt submission
-X_final[!, :meter_reading] = final_preds
-X_final[!, :row_id] = test.row_id
-CSV.write("data/submission_dt.csv", X_final[!, [:row_id, :meter_reading]])
-
-# rf submission
-final_preds = apply_forest(rf, convert(Matrix, X_final))
-X_final[!, :meter_reading] = final_preds
-X_final[!, :row_id] = test.row_id
-CSV.write("data/submission_rf.csv", X_final[!, [:row_id, :meter_reading]])
-
