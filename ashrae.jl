@@ -1,3 +1,4 @@
+
 using
 	CSV,
 	DataFrames,
@@ -11,9 +12,9 @@ using
 	XGBoost
 
 # whether to reperform grid search
-grid_search = false
+grid_search = true
 # whether to work with only a 500k sample of the data
-sample = false
+sampling = true
 # number of cores for distributed computing
 addprocs(4)
 # historical performance of algorithms
@@ -23,7 +24,7 @@ perf = CSV.file("data/performance.csv") |> DataFrame!
 # training data read
 building = CSV.file("data/building_metadata.csv") |> DataFrame!
 train = CSV.file("data/train.csv") |> DataFrame!
-if sample
+if sampling
 	train = train[sample(axes(train, 1), 500000; replace = false, ordered = true), :]
 end
 weather = CSV.file("data/weather_train.csv") |> DataFrame!
@@ -131,7 +132,7 @@ if grid_search
 	min_samples_split = [2, 5, 20, 50]
 	min_samples_leaf = [1, 5, 20, 50]
 	min_purity_increase = [0.0, 0.001, 0.01]
-	@distributed for md in max_depth
+	for md in max_depth
 		for mss in min_samples_split
 			for msl in min_samples_leaf
 				for mpi in min_purity_increase
@@ -149,14 +150,14 @@ if grid_search
 						params,
 						result(preds, y_test),
 						0,
-						"NA"
+						"500k sample 80% of data"
 					))
 				end
 			end
 		end
 	end
 	tmp_perf = DataFrame(performance)
-	names!(tmp_perf, Symbol.(["desc", "val_score", "test_score", "notes"]))
+	names!(tmp_perf, [:desc, :val_score, :test_score, :notes])
 	perf = [perf; tmp_perf]
 	CSV.write("data/performance.csv", perf)
 	best_score = minimum([i[2] for i in performance])
@@ -198,7 +199,47 @@ CSV.write("data/submission_rf.csv", X_submission[!, [:row_id, :meter_reading]])
 
 
 # xgboost
-bst = xgboost(select(X, Not(:meter_reading)), 2, label=X[!, :meter_reading], eta=1, max_depth=2)
+if grid_search
+	f(x) = maximum([x, 0])
+	performance = []
+	num_round = [10, 20, 30]
+	eta = [0.1]
+	max_depth = [50]
+	for nr in num_round
+		for et in eta
+			for md in max_depth
+				params = "xgboost, num_round:$nr, eta:$et, max_depth:$md,"
+				println(params)
+				bst = xgboost(
+						convert(Matrix, X_train),
+						nr,
+						label=convert(Array, y_train),
+						eta=et,
+						max_depth=md
+					)
+				preds = XGBoost.predict(bst, convert(Matrix, X_test))
+				push!(performance, (
+					params,
+					result(f.(preds), y_test),
+					0,
+					"500k sample 80% of data"
+				))
+			end
+		end
+	end
+	tmp_perf = DataFrame(performance)
+	names!(tmp_perf, [:desc, :val_score, :test_score, :notes])
+	perf = [perf; tmp_perf]
+	CSV.write("data/performance.csv", perf)
+	best_score = minimum([i[2] for i in performance])
+	best_params = [i[1] for i in performance if i[2] == best_score]
+	println(best_params)
+end
+
+# all data
+bst = xgboost(convert(Matrix, select(X, Not(:meter_reading))), 20, label=X[!, :meter_reading], eta=0.1, max_depth=50)
+# bst = Booster(model_file = "models/xgb.model")
+XGBoost.save(bst,"models/xgb.model")
 # submission
 final_preds = XGBoost.predict(bst, convert(Matrix, X_submission))
 X_submission[!, :meter_reading] = final_preds
