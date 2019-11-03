@@ -21,7 +21,7 @@ one_hot_encoding = false
 # whether or not to include 0 meter readings
 include_zero = false
 # if submitting, which algorithm
-submitting = "bst" # ["dt", "rf", "bst"]
+submitting = "rf" # ["dt", "rf", "bst"]
 do_submission = false
 # historical performance of algorithms
 perf = CSV.file("data/performance.csv") |> DataFrame!
@@ -198,20 +198,70 @@ end
 
 # random forest
 if submitting == "rf"
-	n_subfeatures=-1; n_trees=20; partial_sampling=0.7; max_depth=-1
-	min_samples_leaf=5; min_samples_split=2; min_purity_increase=0.0
-	rf = build_forest(X[!, :meter_reading], convert(Matrix, select(X, Not(:meter_reading))),
-	                     n_subfeatures,
-	                     n_trees,
-	                     partial_sampling,
-	                     max_depth,
-	                     min_samples_leaf,
-	                     min_samples_split,
-	                     min_purity_increase)
+	if grid_search
+		performance = []
+		n_subfeatures = -1
+		n_trees = [20, 50, 100]
+		partial_sampling = [0.7, 1]
+		max_depth = [-1, 5]
+		min_samples_leaf = [5, 10]
+		min_samples_split = [2, 10]
+		min_purity_increase = 0.0
+		for nt in n_trees
+			for ps in partial_sampling
+				for md in max_depth
+					for msl in min_samples_leaf
+						for mss in min_samples_split
+							params = "random forest, n_subfeatures:$n_subfeatures, n_trees:$nt, partial_sampling:$ps, max_depth:$md, min_samples_leaf:$msl, min_samples_split:$mss, min_purity_increase:$min_purity_increase"
+							println(params)
+							rf = build_forest(y_train, convert(Matrix, X_train),
+							                     n_subfeatures,
+							                     nt,
+							                     ps,
+							                     md,
+							                     msl,
+							                     mss,
+							                     min_purity_increase
+								 )
+							 preds = apply_forest(rf, convert(Matrix, X_test))
+							 push!(performance, (
+								 params,
+								 result(preds, y_test),
+								 0,
+								 "500k sample 80% of data, no one hot, no zero readings"
+							 ))
+						 end
+					 end
+				 end
+			 end
+		end
+		tmp_perf = DataFrame(performance)
+		names!(tmp_perf, [:desc, :val_score, :test_score, :notes])
+		perf = [perf; tmp_perf]
+		CSV.write("data/performance.csv", perf)
+		best_score = minimum([i[2] for i in performance])
+		best_params = [i[1] for i in performance if i[2] == best_score]
+		println(best_params)
+	 end
 	#preds = apply_forest(rf, convert(Matrix, X_test))
 	#print("rf: " * results(preds, y_test))
 	# submission
 	if do_submission
+		n_subfeatures = -1
+		n_trees = 20
+		partial_sampling = 0.7
+		max_depth = -1
+		min_samples_leaf = 5
+		min_samples_split = 2
+		min_purity_increase = 0.0
+		rf = build_forest(X[!, :meter_reading], convert(Matrix, select(X, Not(:meter_reading))),
+		                     n_subfeatures,
+		                     n_trees,
+		                     partial_sampling,
+		                     max_depth,
+		                     min_samples_leaf,
+		                     min_samples_split,
+		                     min_purity_increase)
 		final_preds = apply_forest(rf, convert(Matrix, X_submission))
 		X_submission[!, :meter_reading] = final_preds
 		X_submission[!, :row_id] = test.row_id
